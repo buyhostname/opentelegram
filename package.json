@@ -5,9 +5,7 @@
   "description": "Telegram bot that connects to OpenCode server via SDK",
   "scripts": {
     "server": "node server.js",
-    "client": "node client.js",
-    "dev:server": "node --watch server.js",
-    "dev:client": "node --watch client.js"
+    "client": "node client.js"
   },
   "dependencies": {
     "@opencode-ai/sdk": "^1.2.6",
