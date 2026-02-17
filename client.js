@@ -210,7 +210,7 @@ app.use(session({
     }
 }));
 
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.CLIENT_PORT || 3003;
 
 // Home page
 app.get('/', (req, res) => {
