@@ -14,47 +14,10 @@ Telegram bot that connects to OpenCode AI server, enabling AI chat via Telegram 
 
 ## Setup
 
-### Quick Setup
-
 Deploy on [hoston.ai](https://hoston.ai) - paste this:
 
 ```
 copy this project and setup https://github.com/buyhostname/opentelegram
-```
-
-### Manual Setup
-
-1. Clone the repository:
-```bash
-git clone https://github.com/buyhostname/opentelegram.git
-cd opentelegram
-```
-
-2. Install dependencies:
-```bash
-npm install
-```
-
-3. Copy `.env.example` to `.env` and configure:
-```bash
-cp .env.example .env
-```
-
-4. Edit `.env` with your values:
-   - `TELEGRAM_BOT_TOKEN` - Get from [@BotFather](https://t.me/BotFather)
-   - `TELEGRAM_BOT_USERNAME` - Your bot's username
-   - `TELEGRAM_GROUP_ID` - (Optional) Group ID for restricted access
-   - `OPENAI_API_KEY` - For voice transcription (Whisper)
-   - `SESSION_SECRET` - Change to a secure random string
-
-5. Start the OpenCode server:
-```bash
-npm run server
-```
-
-6. In another terminal, start the client:
-```bash
-npm run client
 ```
 
 ## Environment Variables

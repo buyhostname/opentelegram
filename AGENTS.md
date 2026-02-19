@@ -4,85 +4,81 @@ This file provides instructions for AI agents to help users set up OpenTelegram.
 
 ## Setup Workflow
 
-When a user asks for help setting up OpenTelegram, follow these steps:
+When a user asks for help setting up OpenTelegram, guide them through these steps ONE AT A TIME. Wait for their response before proceeding to the next step.
 
-### 1. Check Environment Configuration
+### Step 1: Create Telegram Bot via BotFather
 
-First, check if `.env` exists and what values are configured:
+Ask the user:
 
+> "Let's set up your Telegram bot! Please follow these steps:
+> 
+> 1. Open Telegram and search for **@BotFather** (or click: https://t.me/BotFather)
+> 2. Start a chat and send: `/newbot`
+> 3. BotFather will ask for a **name** for your bot - this is the display name (e.g., "My Example Site")
+> 4. Then it will ask for a **username** - this must end in 'bot' (e.g., "examplesite_bot" or "ExampleSiteBot")
+> 5. Once done, **copy and paste the ENTIRE response message** from BotFather here so I can extract the token for you."
+
+When the user pastes the BotFather response, extract:
+- **Bot token**: Look for the line containing `Use this token to access the HTTP API:` followed by a token in format `1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`
+- **Bot username**: Look for `@username` in the response or the username they chose
+
+Example BotFather response to parse:
+```
+Done! Congratulations on your new bot. You will find it at t.me/ExampleSiteBot. You can now add a description, about section and profile picture for your bot, see /setname, /setdescription and /setuserpic.
+
+Use this token to access the HTTP API:
+1234567890:ABCdefGHIjklMNOpqrsTUVwxyz-1234567890
+Keep your token secure and store it safely, it can be used by anyone to control your bot.
+
+For a description of the Bot API, see this page: https://core.telegram.org/bots/api
+```
+
+### Step 2: Get OpenAI API Key (Optional - for voice messages)
+
+Ask the user:
+
+> "Do you want to enable voice message support? This requires an OpenAI API key for Whisper transcription.
+> 
+> If yes:
+> 1. Go to: https://platform.openai.com/api-keys
+> 2. Create a new API key
+> 3. Copy and paste the key here
+> 
+> If you don't need voice messages, just say 'skip'."
+
+### Step 3: Configure Environment
+
+After collecting the information:
+
+1. Check if `.env` exists:
 ```bash
 cat .env 2>/dev/null || echo "No .env file found"
 ```
 
-If `.env` doesn't exist, copy from example:
+2. If `.env` doesn't exist, copy from example:
 ```bash
 cp .env.example .env
 ```
 
-### 2. Required Configuration
-
-Check and ask the user for any missing required values:
-
-#### Telegram Bot Token (REQUIRED)
+3. Generate a session secret:
+```bash
+openssl rand -hex 32
 ```
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-```
-- User must create a bot via [@BotFather](https://t.me/BotFather) on Telegram
-- Send `/newbot` to BotFather and follow the prompts
-- Copy the token provided
 
-#### Telegram Bot Username (REQUIRED)
-```
-TELEGRAM_BOT_USERNAME=YourBotUsername
-```
-- The username chosen when creating the bot (without @)
+4. Update the `.env` file with:
+   - `TELEGRAM_BOT_TOKEN` - Extracted from BotFather response
+   - `TELEGRAM_BOT_USERNAME` - Extracted from BotFather response (without @)
+   - `SESSION_SECRET` - The generated random string
+   - `OPENAI_API_KEY` - If provided by user
 
-#### Session Secret (REQUIRED)
-```
-SESSION_SECRET=change_this_to_a_secure_secret
-```
-- Generate a random string for session security
-- Can generate with: `openssl rand -hex 32`
+### Step 4: Verify and Start
 
-### 3. Optional Configuration
-
-These have sensible defaults but can be customized:
-
-#### OpenAI API Key (Optional - for voice messages)
-```
-OPENAI_API_KEY=your_openai_api_key_here
-```
-- Required only if user wants voice message transcription
-- Get from https://platform.openai.com/api-keys
-
-#### Telegram Group ID (Optional)
-```
-TELEGRAM_GROUP_ID=your_group_id
-```
-- Only needed if restricting bot to a specific group
-
-#### OpenCode Settings (Optional)
-```
-OPENCODE_HOST=127.0.0.1
-OPENCODE_PORT=4097
-OPENCODE_MODEL=opencode/minimax-m2.5-free
-```
-- Defaults work for local setup
-
-### 4. Verification Checklist
-
-Before starting, verify:
-
-- [ ] `.env` file exists
-- [ ] `TELEGRAM_BOT_TOKEN` is set (not placeholder)
-- [ ] `TELEGRAM_BOT_USERNAME` is set (not placeholder)
-- [ ] `SESSION_SECRET` is changed from default
-- [ ] Dependencies installed (`npm install`)
-- [ ] ffmpeg is installed (for video support)
-
-### 5. Starting the Application
+Before starting, verify the `.env` is correctly configured, then:
 
 ```bash
+# Install dependencies if needed
+npm install
+
 # Terminal 1: Start OpenCode server
 npm run server
 
@@ -90,7 +86,22 @@ npm run server
 npm run client
 ```
 
-### 6. Common Issues
+## Environment Variables Reference
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| TELEGRAM_BOT_TOKEN | Yes | Bot token from @BotFather |
+| TELEGRAM_BOT_USERNAME | Yes | Bot username without @ |
+| SESSION_SECRET | Yes | Random string for sessions |
+| OPENAI_API_KEY | No | For voice transcription - get from https://platform.openai.com/api-keys |
+| TELEGRAM_GROUP_ID | No | Restrict to specific group |
+| OPENCODE_HOST | No | Server host (default: 127.0.0.1) |
+| OPENCODE_PORT | No | Server port (default: 4097) |
+| OPENCODE_MODEL | No | Default AI model |
+| PORT | No | Web server port (default: 3002) |
+| CLIENT_PORT | No | Client port (default: 3003) |
+
+## Common Issues
 
 #### "Telegram polling error"
 - Check TELEGRAM_BOT_TOKEN is correct
@@ -106,18 +117,3 @@ npm run client
 #### Connection to OpenCode server failed
 - Verify server is running: `npm run server`
 - Check OPENCODE_HOST and OPENCODE_PORT match server settings
-
-## Environment Variable Summary
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| TELEGRAM_BOT_TOKEN | Yes | Bot token from @BotFather |
-| TELEGRAM_BOT_USERNAME | Yes | Bot username without @ |
-| SESSION_SECRET | Yes | Random string for sessions |
-| OPENAI_API_KEY | No | For voice transcription |
-| TELEGRAM_GROUP_ID | No | Restrict to specific group |
-| OPENCODE_HOST | No | Server host (default: 127.0.0.1) |
-| OPENCODE_PORT | No | Server port (default: 4097) |
-| OPENCODE_MODEL | No | Default AI model |
-| PORT | No | Web server port (default: 3002) |
-| CLIENT_PORT | No | Client port (default: 3003) |
