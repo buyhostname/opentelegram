@@ -76,12 +76,13 @@ openssl rand -hex 32
    - `TELEGRAM_BOT_USERNAME` - Extracted from BotFather response (without @)
    - `SESSION_SECRET` - The generated random string
    - `OPENAI_API_KEY` - If provided by user
+   - `CLIENT_PORT` - You probably will use pm2 to run the app. Check `pm2 list` to see what ports are in use and pick an unused one.
 
-5. Install dependencies and start the bot:
+5. Install dependencies and start the bot. You probably will use pm2 to run the app. Check `pm2 list` to see what ports are in use and pick an unused one for `CLIENT_PORT`:
 ```bash
 npm install
-npm run server &
-npm run client
+pm2 start "npm run server" --name "opentelegram-server-$PORT" --time
+pm2 start "npm run client" --name "opentelegram-client-$CLIENT_PORT" --time
 ```
 
 ### Step 4: First User Setup (Admin Registration)
