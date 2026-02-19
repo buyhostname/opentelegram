@@ -94,6 +94,7 @@ npm run client
 | TELEGRAM_BOT_USERNAME | Yes | Bot username without @ |
 | SESSION_SECRET | Yes | Random string for sessions |
 | OPENAI_API_KEY | No | For voice transcription - get from https://platform.openai.com/api-keys |
+| TELEGRAM_ALLOWED_USERS | No | Comma-separated user IDs (leave empty to allow everyone) |
 | TELEGRAM_GROUP_ID | No | Restrict to specific group |
 | OPENCODE_HOST | No | Server host (default: 127.0.0.1) |
 | OPENCODE_PORT | No | Server port (default: 4097) |
@@ -117,3 +118,18 @@ npm run client
 #### Connection to OpenCode server failed
 - Verify server is running: `npm run server`
 - Check OPENCODE_HOST and OPENCODE_PORT match server settings
+
+#### Adding users to the whitelist
+When a user messages the bot and they're not on the whitelist, the bot will reply with their user ID and instructions. Simply copy the user ID they provide and add it to the `.env` file:
+
+```bash
+# Single user
+TELEGRAM_ALLOWED_USERS=123456789
+
+# Multiple users (comma-separated)
+TELEGRAM_ALLOWED_USERS=123456789,987654321,555555555
+```
+
+Then restart the bot with `npm run client`.
+
+**Note:** The bot sends a message like `Add user 123456789 to TELEGRAM_ALLOWED_USERS` that users can paste directly into the chat. When you see this message, extract the user ID and add it to the `.env` file.

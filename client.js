@@ -13,6 +13,15 @@ import { execSync, spawn } from 'child_process';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Check required environment variables before starting
+if (process.env.TELEGRAM_ALLOWED_USERS === undefined) {
+    console.error('ERROR: TELEGRAM_ALLOWED_USERS environment variable is not set.');
+    console.error('Please add TELEGRAM_ALLOWED_USERS to your .env file.');
+    console.error('Example: TELEGRAM_ALLOWED_USERS=123456789 (your Telegram user ID)');
+    console.error('Use TELEGRAM_ALLOWED_USERS=0 to start the bot and get your user ID.');
+    process.exit(1);
+}
+
 const app = express();
 
 // OpenCode client - connects to running server
@@ -43,6 +52,37 @@ const userModels = new Map();
 
 // Store models temporarily for callback lookups (indexed)
 let modelIndex = new Map();
+
+// Parse allowed users whitelist from environment
+const allowedUsers = process.env.TELEGRAM_ALLOWED_USERS
+    .split(',').map(id => id.trim()).filter(id => id && id !== '0');
+
+if (allowedUsers.length > 0) {
+    console.log(`User whitelist enabled: ${allowedUsers.length} user(s) allowed`);
+} else {
+    console.log('No users in whitelist - all users will be prompted for their ID');
+}
+
+// Check if a user is authorized to use the bot
+// Returns true if authorized, false otherwise (and sends unauthorized message)
+async function checkUserAuthorized(msg) {
+    const userId = msg.from?.id;
+    const chatId = msg.chat.id;
+    
+    // Check if user is in whitelist
+    if (userId && allowedUsers.includes(String(userId))) {
+        return true;
+    }
+    
+    // User not authorized - send message they can paste back to the agent
+    await telegramBot.sendMessage(chatId,
+        `You are not authorized to use this bot.\n\n` +
+        `Paste this into the chat to allow your user ID to control the machine:\n\n` +
+        `Add user ${userId} to TELEGRAM_ALLOWED_USERS`
+    );
+    
+    return false;
+}
 
 // Get the current model for a user (falls back to env default)
 function getUserModel(chatId) {
@@ -207,6 +247,8 @@ async function extractFrames(videoPath, framesDir, videoDuration, onProgress) {
 // Handle /start command
 if (telegramBot) {
     telegramBot.onText(/\/start/, async (msg) => {
+        if (!await checkUserAuthorized(msg)) return;
+        
         const chatId = msg.chat.id;
         const currentModel = getUserModel(chatId);
         await telegramBot.sendMessage(chatId, 
@@ -231,6 +273,8 @@ if (telegramBot) {
 
     // Handle /new command - create new session
     telegramBot.onText(/\/new/, async (msg) => {
+        if (!await checkUserAuthorized(msg)) return;
+        
         const chatId = msg.chat.id;
         
         try {
@@ -251,6 +295,8 @@ if (telegramBot) {
 
     // Handle /sessions command
     telegramBot.onText(/\/sessions/, async (msg) => {
+        if (!await checkUserAuthorized(msg)) return;
+        
         const chatId = msg.chat.id;
         
         try {
@@ -278,6 +324,8 @@ if (telegramBot) {
 
     // Handle /help command
     telegramBot.onText(/\/help/, async (msg) => {
+        if (!await checkUserAuthorized(msg)) return;
+        
         const chatId = msg.chat.id;
         await telegramBot.sendMessage(chatId,
             `*OpenTelegram Help*\n\n` +
@@ -310,6 +358,8 @@ if (telegramBot) {
 
     // Handle /model command - show current model or set new one
     telegramBot.onText(/\/model(?:\s+(.+))?/, async (msg, match) => {
+        if (!await checkUserAuthorized(msg)) return;
+        
         const chatId = msg.chat.id;
         const modelArg = match[1]?.trim();
         const currentModel = getUserModel(chatId);
@@ -344,6 +394,8 @@ if (telegramBot) {
 
     // Handle /models command - show inline keyboard with model options
     telegramBot.onText(/\/models/, async (msg) => {
+        if (!await checkUserAuthorized(msg)) return;
+        
         const chatId = msg.chat.id;
         const currentModel = getUserModel(chatId);
 
@@ -467,6 +519,9 @@ if (telegramBot) {
         // Skip voice, audio, photo, and video messages - handled by separate events
         if (msg.voice || msg.audio || msg.photo || msg.video) return;
         
+        // Check authorization
+        if (!await checkUserAuthorized(msg)) return;
+        
         const chatId = msg.chat.id;
         const text = msg.text;
 
@@ -549,6 +604,8 @@ if (telegramBot) {
 
     // Handle voice messages
     telegramBot.on('voice', async (msg) => {
+        if (!await checkUserAuthorized(msg)) return;
+        
         const chatId = msg.chat.id;
         
         if (!process.env.OPENAI_API_KEY) {
@@ -661,6 +718,8 @@ if (telegramBot) {
 
     // Handle photo messages
     telegramBot.on('photo', async (msg) => {
+        if (!await checkUserAuthorized(msg)) return;
+        
         const chatId = msg.chat.id;
         const caption = msg.caption || '';
         
@@ -826,6 +885,8 @@ if (telegramBot) {
 
     // Handle video messages
     telegramBot.on('video', async (msg) => {
+        if (!await checkUserAuthorized(msg)) return;
+        
         const chatId = msg.chat.id;
         const caption = msg.caption || '';
         
