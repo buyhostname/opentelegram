@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import express from 'express';
 import session from 'express-session';
 import path from 'path';
@@ -13,14 +13,8 @@ import { execSync, spawn } from 'child_process';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Check required environment variables before starting
-if (process.env.TELEGRAM_ALLOWED_USERS === undefined) {
-    console.error('ERROR: TELEGRAM_ALLOWED_USERS environment variable is not set.');
-    console.error('Please add TELEGRAM_ALLOWED_USERS to your .env file.');
-    console.error('Example: TELEGRAM_ALLOWED_USERS=123456789 (your Telegram user ID)');
-    console.error('Use TELEGRAM_ALLOWED_USERS=0 to start the bot and get your user ID.');
-    process.exit(1);
-}
+// Load .env file fresh (override any cached values)
+dotenv.config({ path: path.join(__dirname, '.env'), override: true });
 
 const app = express();
 
@@ -53,14 +47,46 @@ const userModels = new Map();
 // Store models temporarily for callback lookups (indexed)
 let modelIndex = new Map();
 
+// Track bot start time to ignore old messages after restart
+const botStartTime = Math.floor(Date.now() / 1000);
+
 // Parse allowed users whitelist from environment
 const allowedUsers = process.env.TELEGRAM_ALLOWED_USERS
-    .split(',').map(id => id.trim()).filter(id => id && id !== '0');
+    ? process.env.TELEGRAM_ALLOWED_USERS.split(',').map(id => id.trim()).filter(id => id && id !== '0')
+    : [];
 
 if (allowedUsers.length > 0) {
     console.log(`User whitelist enabled: ${allowedUsers.length} user(s) allowed`);
 } else {
-    console.log('No users in whitelist - all users will be prompted for their ID');
+    console.log('No users in whitelist - first user to message will become admin');
+}
+
+// Add user to .env file and exit (for first-time setup)
+function addUserToEnvAndExit(userId) {
+    const envPath = path.join(__dirname, '.env');
+    let envContent = '';
+    
+    // Read existing .env if it exists
+    if (fs.existsSync(envPath)) {
+        envContent = fs.readFileSync(envPath, 'utf8');
+    }
+    
+    // Check if TELEGRAM_ALLOWED_USERS already exists (not commented out)
+    const envVarRegex = /^TELEGRAM_ALLOWED_USERS=.*$/m;
+    if (envVarRegex.test(envContent)) {
+        // Replace the existing line
+        envContent = envContent.replace(
+            envVarRegex,
+            `TELEGRAM_ALLOWED_USERS=${userId}`
+        );
+    } else {
+        // Append to the file
+        envContent += `\n# User whitelist - only these user IDs can use the bot\nTELEGRAM_ALLOWED_USERS=${userId}\n`;
+    }
+    
+    fs.writeFileSync(envPath, envContent);
+    console.log(`Added user ${userId} to .env as admin. Exiting for restart...`);
+    process.exit(0);
 }
 
 // Check if a user is authorized to use the bot
@@ -68,6 +94,24 @@ if (allowedUsers.length > 0) {
 async function checkUserAuthorized(msg) {
     const userId = msg.from?.id;
     const chatId = msg.chat.id;
+    const msgTime = msg.date || 0;
+    
+    // Ignore messages sent before bot started (old messages from queue after restart)
+    if (msgTime < botStartTime) {
+        console.log(`Ignoring old message from ${userId} (msg time: ${msgTime}, bot start: ${botStartTime})`);
+        return false;
+    }
+    
+    // If no allowlist configured, first user becomes admin
+    if (allowedUsers.length === 0 && userId) {
+        await telegramBot.sendMessage(chatId,
+            `You are the first user to message this bot.\n\n` +
+            `Adding you as admin (user ID: ${userId}).\n\n` +
+            `The bot will restart now. Please message again in a few seconds.`
+        );
+        addUserToEnvAndExit(userId);
+        return false; // Won't reach here, but for safety
+    }
     
     // Check if user is in whitelist
     if (userId && allowedUsers.includes(String(userId))) {

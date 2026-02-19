@@ -86,6 +86,19 @@ npm run server
 npm run client
 ```
 
+### Step 5: First User Setup (Admin Registration)
+
+After starting the bot, tell the user:
+
+> "The bot is now running! Here's how to complete setup:
+>
+> 1. Open Telegram and message your bot
+> 2. The first person to message the bot automatically becomes the admin
+> 3. The bot will save your user ID to the `.env` file and restart
+> 4. After the restart, send another message - you should now have full access!
+>
+> **Important:** You must send a NEW message after the bot restarts. The bot ignores old messages from before its startup."
+
 ## Environment Variables Reference
 
 | Variable | Required | Description |
@@ -94,7 +107,7 @@ npm run client
 | TELEGRAM_BOT_USERNAME | Yes | Bot username without @ |
 | SESSION_SECRET | Yes | Random string for sessions |
 | OPENAI_API_KEY | No | For voice transcription - get from https://platform.openai.com/api-keys |
-| TELEGRAM_ALLOWED_USERS | No | Comma-separated user IDs (leave empty to allow everyone) |
+| TELEGRAM_ALLOWED_USERS | No | Comma-separated user IDs (leave empty - auto-generated on first message) |
 | TELEGRAM_GROUP_ID | No | Restrict to specific group |
 | OPENCODE_HOST | No | Server host (default: 127.0.0.1) |
 | OPENCODE_PORT | No | Server port (default: 4097) |
@@ -120,7 +133,9 @@ npm run client
 - Check OPENCODE_HOST and OPENCODE_PORT match server settings
 
 #### Adding users to the whitelist
-When a user messages the bot and they're not on the whitelist, the bot will reply with their user ID and instructions. Simply copy the user ID they provide and add it to the `.env` file:
+**First-time setup:** The first user to message the bot automatically becomes the admin. The bot will add their user ID to the `.env` file and restart.
+
+**Adding additional users:** When a user messages the bot and they're not on the whitelist, the bot will reply with their user ID and instructions. Simply copy the user ID they provide and add it to the `.env` file:
 
 ```bash
 # Single user
