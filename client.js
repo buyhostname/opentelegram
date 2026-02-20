@@ -41,7 +41,8 @@ const openai = new OpenAI({
 // Store active sessions (chatId -> sessionId mapping)
 const userSessions = new Map();
 
-// Store user model preferences (chatId -> modelId mapping)
+// Store user model preferences (userId -> modelId mapping)
+// Keyed by USER ID so model selection persists across different chats (private, groups, etc.)
 const userModels = new Map();
 
 // Store models temporarily for callback lookups (indexed)
@@ -63,6 +64,9 @@ const SYNC_GROUP_ID = process.env.TELEGRAM_SYNC_GROUP_ID || process.env.TELEGRAM
 const lastPostedContent = new Map();
 // Track sessions initiated from Telegram (these should NOT be synced back to Telegram)
 const telegramInitiatedSessions = new Set();
+// Track sessions that have an active topic (to avoid creating duplicates after restart)
+// This is populated when we receive a message in a synced topic
+const sessionsWithTopics = new Set();
 
 // Parse allowed users whitelist from environment
 const allowedUsers = process.env.TELEGRAM_ALLOWED_USERS
@@ -169,6 +173,7 @@ async function createSyncTopic(sessionId, title, directory) {
         // Store mappings
         sessionToTopic.set(sessionId, topicId);
         topicToSession.set(topicId, sessionId);
+        sessionsWithTopics.add(sessionId);
         
         console.log(`[SYNC] Created sync topic: ${title} (${topicId}) for session ${sessionId.slice(0, 8)}`);
         return { topicId, title };
@@ -229,29 +234,48 @@ async function handleSyncTopicReply(topicId, msg, content) {
         return;
     }
     
+    // Mark this session as having an active topic (prevents duplicate topic creation)
+    sessionsWithTopics.add(sessionId);
+    // Also mark as Telegram-initiated to prevent sync-back
+    telegramInitiatedSessions.add(sessionId);
+    
     const chatId = msg.chat.id;
     console.log(`[SYNC] Forwarding topic reply to OpenCode session ${sessionId.slice(0, 8)}: "${content.slice(0, 50)}..."`);
     
     try {
+        // Set processing reaction instead of sending a message
+        try {
+            await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                reaction: [{ type: 'emoji', emoji: '⏳' }]
+            });
+        } catch (e) { /* ignore reaction errors */ }
+        
         // Send typing indicator
         await telegramBot.sendChatAction(chatId, 'typing');
         
-        // Get model for user (or use default)
+        // Get model for user - keyed by userId so it works across chats
         const userId = msg.from?.id;
         const userModel = getUserModel(userId);
         const modelObj = parseModelId(userModel);
         
-        // Send to OpenCode
+        // Send to OpenCode (no progress message, we use reaction instead)
         const response = await streamWithProgress(
             chatId, 
             sessionId, 
             [{ type: 'text', text: content }], 
             modelObj,
-            `Processing...`,
-            topicId  // Pass topicId for thread context
+            null,  // No progress message - using reaction
+            topicId
         );
         
         console.log(`[SYNC] Got response from OpenCode for topic reply`);
+        
+        // Update reaction to show completion
+        try {
+            await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                reaction: [{ type: 'emoji', emoji: '✅' }]
+            });
+        } catch (e) { /* ignore reaction errors */ }
         
         // Extract response text
         let responseText = '';
@@ -271,16 +295,21 @@ async function handleSyncTopicReply(topicId, msg, content) {
             }
         }
         
-        // Post the response to the topic
+        // Post the response to the topic (without "Assistant:" prefix for cleaner look)
         if (responseText) {
             const responseParts = splitMessage(responseText, 3900);
-            for (let i = 0; i < responseParts.length; i++) {
-                const prefix = i === 0 ? '*Assistant:*\n' : '';
-                await telegramBot.sendMessage(chatId, prefix + responseParts[i], {
-                    message_thread_id: topicId,
-                    parse_mode: 'Markdown'
+            for (const part of responseParts) {
+                await telegramBot.sendMessage(chatId, part, {
+                    message_thread_id: topicId
                 });
             }
+        } else if (response === null) {
+            // Timeout occurred - message already sent by streamWithProgress
+            try {
+                await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                    reaction: [{ type: 'emoji', emoji: '⚠️' }]
+                });
+            } catch (e) { /* ignore */ }
         } else {
             await telegramBot.sendMessage(chatId, '_No response from AI_', {
                 message_thread_id: topicId,
@@ -289,6 +318,12 @@ async function handleSyncTopicReply(topicId, msg, content) {
         }
     } catch (error) {
         console.error('[SYNC] Failed to forward to OpenCode:', error.message);
+        // Set error reaction
+        try {
+            await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                reaction: [{ type: 'emoji', emoji: '❌' }]
+            });
+        } catch (e) { /* ignore */ }
         await telegramBot.sendMessage(chatId, `_Error: ${error.message}_`, {
             message_thread_id: topicId,
             parse_mode: 'Markdown'
@@ -353,6 +388,12 @@ async function handleSessionIdle(sessionId) {
     // Skip sessions initiated from Telegram (they're already in Telegram)
     if (telegramInitiatedSessions.has(sessionId)) {
         console.log(`[SYNC] Skipping sync for Telegram-initiated session: ${sessionId.slice(0, 8)}`);
+        return;
+    }
+    
+    // Skip sessions that already have a topic (even if mapping was lost after restart)
+    if (sessionsWithTopics.has(sessionId)) {
+        console.log(`[SYNC] Skipping sync for session that already has a topic: ${sessionId.slice(0, 8)}`);
         return;
     }
     
@@ -528,8 +569,8 @@ async function checkUserAuthorized(msg) {
 }
 
 // Get the current model for a user (falls back to env default)
-function getUserModel(chatId) {
-    return userModels.get(chatId) || process.env.OPENCODE_MODEL || 'opencode/minimax-m2.5-free';
+function getUserModel(userId) {
+    return userModels.get(userId) || process.env.OPENCODE_MODEL || 'github-copilot/claude-opus-4.5';
 }
 
 // Parse model ID string (provider/model) into { providerID, modelID } object
@@ -569,27 +610,47 @@ async function getAvailableModels() {
 }
 
 // Stream events and send progress updates to user
+// Set context to null to skip progress message (useful when using reactions instead)
 async function streamWithProgress(chatId, sessionId, parts, modelObj, context = '', topicId = null) {
     let progressMessageId = null;
+    const msgOptions = topicId ? { message_thread_id: topicId } : {};
     
-    // Send initial progress message
-    try {
-        const msgOptions = topicId ? { message_thread_id: topicId } : {};
-        const msg = await telegramBot.sendMessage(chatId, context ? `${context}\n\n⏳ Processing...` : '⏳ Processing...', msgOptions);
-        progressMessageId = msg.message_id;
-    } catch (e) {
-        // Ignore progress message errors
+    // Send initial progress message (unless context is null)
+    if (context !== null) {
+        try {
+            const msg = await telegramBot.sendMessage(chatId, context ? `${context}\n\n⏳ Processing...` : '⏳ Processing...', msgOptions);
+            progressMessageId = msg.message_id;
+        } catch (e) {
+            // Ignore progress message errors
+        }
     }
     
-    // Send the prompt and wait for response
+    // Set up a timeout to detect if AI asks a question (which would block the prompt)
+    const TIMEOUT_MS = 120000; // 2 minutes
+    let timeoutId = null;
+    let questionDetected = false;
+    
+    const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+            reject(new Error('TIMEOUT: The AI may be waiting for input in the terminal. Please check the OpenCode terminal UI.'));
+        }, TIMEOUT_MS);
+    });
+    
+    // Send the prompt and wait for response (with timeout)
     try {
-        const result = await opencode.session.prompt({
+        const promptPromise = opencode.session.prompt({
             path: { id: sessionId },
             body: { 
                 parts,
                 model: modelObj
             }
         });
+        
+        // Race between prompt completion and timeout
+        const result = await Promise.race([promptPromise, timeoutPromise]);
+        
+        // Clear timeout since we got a response
+        if (timeoutId) clearTimeout(timeoutId);
         
         // Delete progress message
         if (progressMessageId) {
@@ -606,6 +667,9 @@ async function streamWithProgress(chatId, sessionId, parts, modelObj, context = 
         
         return result?.data;
     } catch (error) {
+        // Clear timeout
+        if (timeoutId) clearTimeout(timeoutId);
+        
         // Delete progress message on error
         if (progressMessageId) {
             try {
@@ -614,6 +678,18 @@ async function streamWithProgress(chatId, sessionId, parts, modelObj, context = 
                 // Ignore
             }
         }
+        
+        // If it's a timeout, send a helpful message instead of throwing
+        if (error.message.includes('TIMEOUT')) {
+            await telegramBot.sendMessage(chatId, 
+                `⚠️ Request timed out.\n\n` +
+                `The AI may be waiting for input or asking a question in the terminal.\n` +
+                `Please check the OpenCode terminal UI to continue.`,
+                msgOptions
+            );
+            return null;
+        }
+        
         throw error;
     }
 }
@@ -694,7 +770,8 @@ if (telegramBot) {
         if (!await checkUserAuthorized(msg)) return;
         
         const chatId = msg.chat.id;
-        const currentModel = getUserModel(chatId);
+        const userId = msg.from?.id;
+        const currentModel = getUserModel(userId);
         await telegramBot.sendMessage(chatId, 
             `Welcome to OpenTelegram!\n\n` +
             `I connect you to OpenCode AI assistant.\n\n` +
@@ -805,15 +882,16 @@ if (telegramBot) {
         if (!await checkUserAuthorized(msg)) return;
         
         const chatId = msg.chat.id;
+        const userId = msg.from?.id;
         const modelArg = match[1]?.trim();
-        const currentModel = getUserModel(chatId);
+        const currentModel = getUserModel(userId);
 
         if (modelArg) {
             const models = await getAvailableModels();
             const model = models.find(m => m.id === modelArg || m.name.toLowerCase().includes(modelArg.toLowerCase()));
             if (model) {
-                // Set the user's model preference
-                userModels.set(chatId, model.id);
+                // Set the user's model preference (keyed by userId)
+                userModels.set(userId, model.id);
                 await telegramBot.sendMessage(chatId,
                     `✅ *Model set to:* ${model.name}\n\n` +
                     `ID: \`${model.id}\`\n\n` +
@@ -841,7 +919,8 @@ if (telegramBot) {
         if (!await checkUserAuthorized(msg)) return;
         
         const chatId = msg.chat.id;
-        const currentModel = getUserModel(chatId);
+        const userId = msg.from?.id;
+        const currentModel = getUserModel(userId);
 
         const models = await getAvailableModels();
         
@@ -877,6 +956,7 @@ if (telegramBot) {
     telegramBot.on('callback_query', async (callbackQuery) => {
         const { data, message } = callbackQuery;
         const chatId = message.chat.id;
+        const userId = callbackQuery.from?.id;
         
         // Handle pagination
         if (data && data.startsWith('page_')) {
@@ -884,7 +964,7 @@ if (telegramBot) {
             const pageSize = 50;
             const start = page * pageSize;
             const end = start + pageSize;
-            const currentModel = getUserModel(chatId);
+            const currentModel = getUserModel(userId);
             
             const models = await getAvailableModels();
             const pageModels = models.slice(start, end);
@@ -927,8 +1007,8 @@ if (telegramBot) {
             const model = modelIndex.get(idx);
             
             if (model) {
-                // Set the user's model preference (no server restart needed)
-                userModels.set(chatId, model.id);
+                // Set the user's model preference (keyed by userId)
+                userModels.set(userId, model.id);
                 
                 await telegramBot.answerCallbackQuery(callbackQuery.id, {
                     text: `Model set: ${model.name}`,
@@ -963,16 +1043,57 @@ if (telegramBot) {
         // Skip voice, audio, photo, and video messages - handled by separate events
         if (msg.voice || msg.audio || msg.photo || msg.video) return;
         
-        // Check authorization
-        if (!await checkUserAuthorized(msg)) return;
-        
         const chatId = msg.chat.id;
         const text = msg.text;
         const topicId = msg.message_thread_id;
+        const msgTime = msg.date || 0;
+        
+        // Ignore messages sent before bot started (old messages from queue after restart)
+        if (msgTime < botStartTime) {
+            console.log(`[MESSAGE] Ignoring old message (msg time: ${msgTime}, bot start: ${botStartTime})`);
+            return;
+        }
+        
+        // Check if bot was mentioned in the sync group
+        const botUsername = process.env.TELEGRAM_BOT_USERNAME;
+        const isSyncGroup = SYNC_GROUP_ID && String(chatId) === String(SYNC_GROUP_ID);
+        const isBotMentioned = text && botUsername && (
+            text.includes(`@${botUsername}`) || 
+            (msg.entities && msg.entities.some(e => 
+                e.type === 'mention' && text.slice(e.offset, e.offset + e.length).toLowerCase() === `@${botUsername.toLowerCase()}`
+            ))
+        );
+        
+        // If this is the sync group but NOT in a Forum Topic (General chat), only respond if bot is mentioned
+        // IMPORTANT: Check this BEFORE authorization to avoid sending unauthorized messages in group chats
+        if (isSyncGroup && !topicId && !isBotMentioned) {
+            console.log(`[MESSAGE] Ignoring message in sync group General chat (no topic, no mention): "${text?.substring(0, 50)}..."`);
+            return;
+        }
+        
+        // Check authorization
+        if (!await checkUserAuthorized(msg)) return;
 
         if (!text) {
             // Don't show error for voice/audio (they're handled separately)
             return;
+        }
+        
+        // If bot was mentioned in sync group, strip the mention from the text for processing
+        let processedText = text;
+        if (isSyncGroup && isBotMentioned) {
+            processedText = text.replace(new RegExp(`@${botUsername}\\s*`, 'gi'), '').trim();
+            console.log(`[MESSAGE] Bot mentioned in sync group, processing: "${processedText.substring(0, 50)}..."`);
+            
+            // If only the mention was sent with no actual message, prompt for input
+            if (!processedText) {
+                await telegramBot.sendMessage(chatId, 
+                    `How can I help? Tag me with your question, like:\n\n` +
+                    `\`@${botUsername} what is this codebase about?\``,
+                    { parse_mode: 'Markdown', message_thread_id: topicId }
+                );
+                return;
+            }
         }
         
         // Check if this is a reply in a synced topic (OpenCode session sync)
@@ -1002,7 +1123,7 @@ if (telegramBot) {
             return;
         }
 
-        console.log(`[MESSAGE] Received text message from chatId: ${chatId}, text: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
+        console.log(`[MESSAGE] Received text message from chatId: ${chatId}, text: "${processedText.substring(0, 100)}${processedText.length > 100 ? '...' : ''}"`);
 
         try {
             // Add reaction to show we're working on it
@@ -1030,14 +1151,16 @@ if (telegramBot) {
             await telegramBot.sendChatAction(chatId, 'typing');
 
             // Send message to OpenCode using streaming progress
-            const userModel = getUserModel(chatId);
+            const userId = msg.from?.id;
+            const userModel = getUserModel(userId);
             const modelObj = parseModelId(userModel);
             const response = await streamWithProgress(
                 chatId, 
                 sessionId, 
-                [{ type: 'text', text }], 
+                [{ type: 'text', text: processedText }], 
                 modelObj,
-                `🤔 Processing your message...`
+                `🤔 Processing your message...`,
+                topicId  // Pass topicId so replies go to the same thread
             );
 
             console.log(`Prompt with model ${userModel} (${JSON.stringify(modelObj)}), response:`, JSON.stringify(response, null, 2));
@@ -1066,24 +1189,27 @@ if (telegramBot) {
             if (responseText) {
                 // Split long messages (Telegram limit is 4096)
                 const maxLen = 4000;
+                const msgOptions = topicId ? { message_thread_id: topicId } : {};
                 if (responseText.length > maxLen) {
                     const parts = [];
                     for (let i = 0; i < responseText.length; i += maxLen) {
                         parts.push(responseText.slice(i, i + maxLen));
                     }
                     for (const part of parts) {
-                        await telegramBot.sendMessage(chatId, part);
+                        await telegramBot.sendMessage(chatId, part, msgOptions);
                     }
                 } else {
-                    await telegramBot.sendMessage(chatId, responseText);
+                    await telegramBot.sendMessage(chatId, responseText, msgOptions);
                 }
             } else {
-                await telegramBot.sendMessage(chatId, 'No response received. Please try again.');
+                const msgOptions = topicId ? { message_thread_id: topicId } : {};
+                await telegramBot.sendMessage(chatId, 'No response received. Please try again.', msgOptions);
             }
 
         } catch (error) {
             console.error('Error processing message:', error);
-            await telegramBot.sendMessage(chatId, `Error: ${error.message}`);
+            const msgOptions = topicId ? { message_thread_id: topicId } : {};
+            await telegramBot.sendMessage(chatId, `Error: ${error.message}`, msgOptions);
         }
     });
 
@@ -1160,7 +1286,8 @@ if (telegramBot) {
             await telegramBot.sendChatAction(chatId, 'typing');
             
             // Send message to OpenCode using streaming progress
-            const userModel = getUserModel(chatId);
+            const userId = msg.from?.id;
+            const userModel = getUserModel(userId);
             const modelObj = parseModelId(userModel);
             const aiResponse = await streamWithProgress(
                 chatId, 
@@ -1304,7 +1431,8 @@ if (telegramBot) {
             console.log(`[PHOTO DEBUG] Added file part to request`);
             
             // Send to OpenCode
-            const userModel = getUserModel(chatId);
+            const userId = msg.from?.id;
+            const userModel = getUserModel(userId);
             const modelObj = parseModelId(userModel);
             console.log(`[PHOTO DEBUG] User model: ${userModel}`);
             console.log(`[PHOTO DEBUG] Parsed model object:`, modelObj);
@@ -1557,7 +1685,8 @@ if (telegramBot) {
             progressMsgId = null;
             
             // Send to OpenCode with streaming progress
-            const userModel = getUserModel(chatId);
+            const userId = msg.from?.id;
+            const userModel = getUserModel(userId);
             const modelObj = parseModelId(userModel);
             console.log(`[VIDEO DEBUG] User model: ${userModel}`);
             console.log(`[VIDEO DEBUG] Sending prompt with ${parts.length} parts...`);
