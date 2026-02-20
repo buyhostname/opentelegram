@@ -134,6 +134,40 @@ After starting the bot, tell the user:
 | PORT | No | Web server port (default: 3002) |
 | CLIENT_PORT | No | Client port (default: 3003) |
 
+## Setting Up Two-Way Sync (Forum Topics)
+
+To enable terminal session sync to Telegram Forum Topics:
+
+1. **Create a Telegram group** (or use existing one)
+
+2. **Enable Forum Topics:**
+   - Open the group in Telegram
+   - Tap the group name at the top to open group info
+   - Tap **"Edit"** (pencil icon, top right) - NOT "Group Settings"
+   - Scroll down and enable **"Topics"**
+   - Save changes
+
+3. **Add bot as admin with Manage Topics permission:**
+   - Go back to group info
+   - Tap **"Administrators"**
+   - Tap **"Add Admin"** and select your bot
+   - Enable the **"Manage Topics"** permission
+   - Save
+
+4. **Get the group ID:**
+   - The group ID for supergroups starts with `-100`
+   - You can get it by adding [@userinfobot](https://t.me/userinfobot) to the group temporarily, or forwarding a message from the group to it
+
+5. **Set the environment variable:**
+   ```bash
+   TELEGRAM_SYNC_GROUP_ID=-100XXXXXXXXXX
+   ```
+
+6. **Restart the client:**
+   ```bash
+   pm2 restart telegram-c-4097
+   ```
+
 ## Common Issues
 
 #### "Telegram polling error"
