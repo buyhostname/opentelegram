@@ -17,6 +17,8 @@ pm2 restart telegram-s-4097
 pm2 list
 ```
 
+**Always run `pm2 save` after making any pm2 changes (start, stop, delete, rename).**
+
 **This is your responsibility as the AI agent. Do not leave services running old code.**
 
 ## Setup Workflow
