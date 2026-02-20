@@ -574,7 +574,18 @@ if (telegramBot) {
             return;
         }
 
+        console.log(`[MESSAGE] Received text message from chatId: ${chatId}, text: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
+
         try {
+            // Add reaction to show we're working on it
+            try {
+                await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                    reaction: [{ type: 'emoji', emoji: '👀' }]
+                });
+            } catch (reactionError) {
+                // Reactions may not be supported in all chats
+                console.log(`[MESSAGE] Could not set reaction: ${reactionError.message}`);
+            }
             // Get or create session
             let sessionId = userSessions.get(chatId);
             
@@ -652,12 +663,24 @@ if (telegramBot) {
         
         const chatId = msg.chat.id;
         
+        console.log(`[VOICE] Received voice message from chatId: ${chatId}, duration: ${msg.voice.duration}s`);
+        
         if (!process.env.OPENAI_API_KEY) {
             await telegramBot.sendMessage(chatId, 'Voice input is not configured. Please add OPENAI_API_KEY to the environment.');
             return;
         }
         
         try {
+            // Add reaction to show we're working on it
+            try {
+                await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                    reaction: [{ type: 'emoji', emoji: '👀' }]
+                });
+            } catch (reactionError) {
+                // Reactions may not be supported in all chats
+                console.log(`[VOICE] Could not set reaction: ${reactionError.message}`);
+            }
+            
             // Send typing indicator
             await telegramBot.sendChatAction(chatId, 'typing');
             
@@ -767,11 +790,21 @@ if (telegramBot) {
         const chatId = msg.chat.id;
         const caption = msg.caption || '';
         
-        console.log(`[PHOTO DEBUG] Received photo message from chatId: ${chatId}`);
-        console.log(`[PHOTO DEBUG] Caption: "${caption}"`);
-        console.log(`[PHOTO DEBUG] Photo array length: ${msg.photo?.length || 0}`);
+        console.log(`[PHOTO] Received photo message from chatId: ${chatId}`);
+        console.log(`[PHOTO] Caption: "${caption}"`);
+        console.log(`[PHOTO] Photo array length: ${msg.photo?.length || 0}`);
         
         try {
+            // Add reaction to show we're working on it
+            try {
+                await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                    reaction: [{ type: 'emoji', emoji: '👀' }]
+                });
+            } catch (reactionError) {
+                // Reactions may not be supported in all chats
+                console.log(`[PHOTO] Could not set reaction: ${reactionError.message}`);
+            }
+            
             // Send typing indicator
             await telegramBot.sendChatAction(chatId, 'typing');
             
@@ -934,9 +967,9 @@ if (telegramBot) {
         const chatId = msg.chat.id;
         const caption = msg.caption || '';
         
-        console.log(`[VIDEO DEBUG] Received video message from chatId: ${chatId}`);
-        console.log(`[VIDEO DEBUG] Caption: "${caption}"`);
-        console.log(`[VIDEO DEBUG] Video info:`, {
+        console.log(`[VIDEO] Received video message from chatId: ${chatId}`);
+        console.log(`[VIDEO] Caption: "${caption}"`);
+        console.log(`[VIDEO] Video info:`, {
             file_id: msg.video.file_id,
             file_unique_id: msg.video.file_unique_id,
             file_size: msg.video.file_size,
@@ -949,6 +982,16 @@ if (telegramBot) {
         let progressMsgId = null;
         
         try {
+            // Add reaction to show we're working on it
+            try {
+                await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                    reaction: [{ type: 'emoji', emoji: '👀' }]
+                });
+            } catch (reactionError) {
+                // Reactions may not be supported in all chats
+                console.log(`[VIDEO] Could not set reaction: ${reactionError.message}`);
+            }
+            
             // Send initial progress message
             const progressMsg = await telegramBot.sendMessage(chatId, 
                 `🎬 Processing video...\n⏱️ Duration: ${msg.video.duration}s\n📦 Size: ${(msg.video.file_size / 1024 / 1024).toFixed(2)} MB\n\n⏳ Step 1/3: Downloading...`

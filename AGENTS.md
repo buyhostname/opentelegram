@@ -2,6 +2,23 @@
 
 This file provides instructions for AI agents to help users set up OpenTelegram.
 
+## IMPORTANT: Restarting Services After Code Changes
+
+**After making changes to `client.js`, `server.js`, or other runtime code, you MUST restart the affected services.**
+
+```bash
+# Restart the Telegram client
+pm2 restart telegram-c-4097
+
+# Restart the OpenCode server (if server.js changed)
+pm2 restart telegram-s-4097
+
+# Check status
+pm2 list
+```
+
+**This is your responsibility as the AI agent. Do not leave services running old code.**
+
 ## Setup Workflow
 
 When a user asks for help setting up OpenTelegram, guide them through these steps ONE AT A TIME. Wait for their response before proceeding to the next step.
@@ -81,8 +98,8 @@ openssl rand -hex 32
 5. Install dependencies and start the bot. You probably will use pm2 to run the app. Check `pm2 list` to see what ports are in use and pick an unused one for `CLIENT_PORT`:
 ```bash
 npm install
-pm2 start "npm run server" --name "opentelegram-server-$PORT" --time
-pm2 start "npm run client" --name "opentelegram-client-$CLIENT_PORT" --time
+pm2 start "npm run server" --name "telegram-s-$PORT" --time
+pm2 start "npm run client" --name "telegram-c-$CLIENT_PORT" --time
 ```
 
 ### Step 4: First User Setup (Admin Registration)
