@@ -1,6 +1,6 @@
 # OpenTelegram
 
-Telegram bot that connects to OpenCode AI server, enabling AI chat via Telegram with support for text, voice, images, and video.
+Telegram bot that connects to OpenCode AI server, enabling AI chat via Telegram with support for text, voice, images, and video. Supports two-way sync with Telegram Forum Topics for terminal session mirroring.
 
 ## Features
 
