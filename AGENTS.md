@@ -127,6 +127,7 @@ After starting the bot, tell the user:
 | OPENAI_API_KEY | No | For voice transcription - get from https://platform.openai.com/api-keys |
 | TELEGRAM_ALLOWED_USERS | No | Comma-separated user IDs (leave empty - auto-generated on first message) |
 | TELEGRAM_GROUP_ID | No | Restrict to specific group |
+| TELEGRAM_SYNC_GROUP_ID | No | Forum Topics group for session sync |
 | OPENCODE_HOST | No | Server host (default: 127.0.0.1) |
 | OPENCODE_PORT | No | Server port (default: 4097) |
 | OPENCODE_MODEL | No | Default AI model |

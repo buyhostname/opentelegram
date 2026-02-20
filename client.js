@@ -50,6 +50,20 @@ let modelIndex = new Map();
 // Track bot start time to ignore old messages after restart
 const botStartTime = Math.floor(Date.now() / 1000);
 
+// ============================================
+// OpenCode Sync - Session/Topic Mappings
+// ============================================
+// Maps OpenCode sessionId -> Telegram topicId (message_thread_id)
+const sessionToTopic = new Map();
+// Maps Telegram topicId -> OpenCode sessionId  
+const topicToSession = new Map();
+// Sync group ID (supergroup with forum topics enabled)
+const SYNC_GROUP_ID = process.env.TELEGRAM_SYNC_GROUP_ID || process.env.TELEGRAM_GROUP_ID;
+// Track last posted content to avoid duplicates (sessionId -> { userContent, assistantContent })
+const lastPostedContent = new Map();
+// Track sessions initiated from Telegram (these should NOT be synced back to Telegram)
+const telegramInitiatedSessions = new Set();
+
 // Parse allowed users whitelist from environment
 const allowedUsers = process.env.TELEGRAM_ALLOWED_USERS
     ? process.env.TELEGRAM_ALLOWED_USERS.split(',').map(id => id.trim()).filter(id => id && id !== '0')
@@ -87,6 +101,391 @@ function addUserToEnvAndExit(userId) {
     fs.writeFileSync(envPath, envContent);
     console.log(`Added user ${userId} to .env as admin. Exiting for restart...`);
     process.exit(0);
+}
+
+// ============================================
+// OpenCode Sync Functions
+// ============================================
+
+// Split long messages for Telegram (4096 char limit)
+function splitMessage(text, maxLength = 4000) {
+    if (text.length <= maxLength) return [text];
+    
+    const parts = [];
+    let remaining = text;
+    
+    while (remaining.length > 0) {
+        if (remaining.length <= maxLength) {
+            parts.push(remaining);
+            break;
+        }
+        
+        // Try to split at newline
+        let splitIndex = remaining.lastIndexOf('\n', maxLength);
+        if (splitIndex === -1 || splitIndex < maxLength / 2) {
+            // Try to split at space
+            splitIndex = remaining.lastIndexOf(' ', maxLength);
+        }
+        if (splitIndex === -1 || splitIndex < maxLength / 2) {
+            // Force split
+            splitIndex = maxLength;
+        }
+        
+        parts.push(remaining.slice(0, splitIndex));
+        remaining = remaining.slice(splitIndex).trim();
+    }
+    
+    return parts;
+}
+
+// Create a forum topic in the sync group for an OpenCode session
+async function createSyncTopic(sessionId, title, directory) {
+    if (!SYNC_GROUP_ID || !telegramBot) {
+        console.error('Cannot create sync topic: sync group not configured');
+        return null;
+    }
+    
+    try {
+        console.log(`[SYNC] Creating topic "${title}" in group ${SYNC_GROUP_ID}`);
+        
+        // Create forum topic
+        const topic = await telegramBot.createForumTopic(SYNC_GROUP_ID, title.slice(0, 128));
+        const topicId = topic.message_thread_id;
+        
+        console.log(`[SYNC] Created topic with ID: ${topicId}`);
+        
+        // Send intro message
+        await telegramBot.sendMessage(SYNC_GROUP_ID, 
+            `*OpenCode Session*\n\n` +
+            `Session: \`${sessionId.slice(0, 8)}...\`\n` +
+            `Directory: \`${directory || 'unknown'}\`\n\n` +
+            `_Reply to this thread to send messages to OpenCode_`,
+            { 
+                message_thread_id: topicId,
+                parse_mode: 'Markdown'
+            }
+        );
+        
+        // Store mappings
+        sessionToTopic.set(sessionId, topicId);
+        topicToSession.set(topicId, sessionId);
+        
+        console.log(`[SYNC] Created sync topic: ${title} (${topicId}) for session ${sessionId.slice(0, 8)}`);
+        return { topicId, title };
+    } catch (error) {
+        console.error('[SYNC] Failed to create sync topic:', error.message);
+        return null;
+    }
+}
+
+// Post a message exchange to a sync topic
+async function postToSyncTopic(topicId, userContent, assistantContent) {
+    if (!SYNC_GROUP_ID || !telegramBot) {
+        console.error('Cannot post to sync topic: sync group not configured');
+        return false;
+    }
+    
+    try {
+        // Format user message
+        if (userContent) {
+            const userParts = splitMessage(userContent, 3900);
+            for (let i = 0; i < userParts.length; i++) {
+                const content = i === 0 
+                    ? `*User:*\n${userParts[i]}`
+                    : userParts[i];
+                await telegramBot.sendMessage(SYNC_GROUP_ID, content, {
+                    message_thread_id: topicId,
+                    parse_mode: 'Markdown'
+                });
+            }
+        }
+        
+        // Format assistant message
+        if (assistantContent) {
+            const assistantParts = splitMessage(assistantContent, 3900);
+            for (let i = 0; i < assistantParts.length; i++) {
+                const content = i === 0
+                    ? `*Assistant:*\n${assistantParts[i]}`
+                    : assistantParts[i];
+                await telegramBot.sendMessage(SYNC_GROUP_ID, content, {
+                    message_thread_id: topicId,
+                    parse_mode: 'Markdown'
+                });
+            }
+        }
+        
+        return true;
+    } catch (error) {
+        console.error('[SYNC] Failed to post to sync topic:', error.message);
+        return false;
+    }
+}
+
+// Handle a message from Telegram topic -> forward to OpenCode
+async function handleSyncTopicReply(topicId, msg, content) {
+    const sessionId = topicToSession.get(topicId);
+    if (!sessionId) {
+        console.error('[SYNC] No session found for topic:', topicId);
+        return;
+    }
+    
+    const chatId = msg.chat.id;
+    console.log(`[SYNC] Forwarding topic reply to OpenCode session ${sessionId.slice(0, 8)}: "${content.slice(0, 50)}..."`);
+    
+    try {
+        // Send typing indicator
+        await telegramBot.sendChatAction(chatId, 'typing');
+        
+        // Get model for user (or use default)
+        const userId = msg.from?.id;
+        const userModel = getUserModel(userId);
+        const modelObj = parseModelId(userModel);
+        
+        // Send to OpenCode
+        const response = await streamWithProgress(
+            chatId, 
+            sessionId, 
+            [{ type: 'text', text: content }], 
+            modelObj,
+            `Processing...`,
+            topicId  // Pass topicId for thread context
+        );
+        
+        console.log(`[SYNC] Got response from OpenCode for topic reply`);
+        
+        // Extract response text
+        let responseText = '';
+        if (response && response.parts) {
+            responseText = response.parts
+                .filter(p => p.type === 'text')
+                .map(p => p.text)
+                .join('\n');
+        } else if (response && response.content) {
+            if (typeof response.content === 'string') {
+                responseText = response.content;
+            } else if (Array.isArray(response.content)) {
+                responseText = response.content
+                    .filter(p => p.type === 'text')
+                    .map(p => p.text)
+                    .join('\n');
+            }
+        }
+        
+        // Post the response to the topic
+        if (responseText) {
+            const responseParts = splitMessage(responseText, 3900);
+            for (let i = 0; i < responseParts.length; i++) {
+                const prefix = i === 0 ? '*Assistant:*\n' : '';
+                await telegramBot.sendMessage(chatId, prefix + responseParts[i], {
+                    message_thread_id: topicId,
+                    parse_mode: 'Markdown'
+                });
+            }
+        } else {
+            await telegramBot.sendMessage(chatId, '_No response from AI_', {
+                message_thread_id: topicId,
+                parse_mode: 'Markdown'
+            });
+        }
+    } catch (error) {
+        console.error('[SYNC] Failed to forward to OpenCode:', error.message);
+        await telegramBot.sendMessage(chatId, `_Error: ${error.message}_`, {
+            message_thread_id: topicId,
+            parse_mode: 'Markdown'
+        });
+    }
+}
+
+// ============================================
+// Global Event Subscription for Session Sync
+// ============================================
+
+/**
+ * Extract text content from a message
+ */
+function extractMessageContent(message) {
+    if (!message) return '';
+    const parts = message.parts || [];
+    if (parts.length === 0) return '';
+    
+    let content = '';
+    for (const part of parts) {
+        if (part.type === 'text') {
+            content += part.text || '';
+        }
+    }
+    return content.trim();
+}
+
+/**
+ * Get the latest user prompt and assistant response pair from messages
+ */
+function getLatestExchange(messages) {
+    let lastUserIdx = -1;
+    let lastAssistantIdx = -1;
+    
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        const role = msg.role || msg.info?.role;
+        if (role === 'assistant' && lastAssistantIdx === -1) {
+            lastAssistantIdx = i;
+        }
+        if (role === 'user' && lastAssistantIdx !== -1) {
+            lastUserIdx = i;
+            break;
+        }
+    }
+    
+    if (lastUserIdx === -1 || lastAssistantIdx === -1) {
+        return null;
+    }
+    
+    return {
+        userMessage: messages[lastUserIdx],
+        assistantMessage: messages[lastAssistantIdx]
+    };
+}
+
+/**
+ * Handle session.idle event - sync terminal session to Telegram
+ */
+async function handleSessionIdle(sessionId) {
+    // Skip sessions initiated from Telegram (they're already in Telegram)
+    if (telegramInitiatedSessions.has(sessionId)) {
+        console.log(`[SYNC] Skipping sync for Telegram-initiated session: ${sessionId.slice(0, 8)}`);
+        return;
+    }
+    
+    if (!SYNC_GROUP_ID) {
+        console.log(`[SYNC] No sync group configured, skipping sync`);
+        return;
+    }
+    
+    console.log(`[SYNC] Session idle event for: ${sessionId.slice(0, 8)}`);
+    
+    try {
+        // Get messages for this session
+        const messagesResult = await opencode.session.messages({
+            path: { id: sessionId }
+        });
+        
+        let messages = messagesResult.data || messagesResult || [];
+        if (!Array.isArray(messages)) {
+            if (typeof messages === 'object') {
+                messages = Object.values(messages);
+            }
+        }
+        
+        console.log(`[SYNC] Session ${sessionId.slice(0, 8)} has ${messages.length} messages`);
+        if (messages.length === 0) {
+            return;
+        }
+        
+        const exchange = getLatestExchange(messages);
+        if (!exchange) {
+            console.log(`[SYNC] No complete exchange in session ${sessionId.slice(0, 8)}`);
+            return;
+        }
+        
+        const userContent = extractMessageContent(exchange.userMessage);
+        const assistantContent = extractMessageContent(exchange.assistantMessage);
+        
+        if (!userContent && !assistantContent) {
+            return;
+        }
+        
+        // Check if we already posted this exact content (dedup)
+        const lastPosted = lastPostedContent.get(sessionId);
+        if (lastPosted && 
+            lastPosted.userContent === userContent && 
+            lastPosted.assistantContent === assistantContent) {
+            console.log(`[SYNC] Already posted this content for session ${sessionId.slice(0, 8)}`);
+            return;
+        }
+        
+        // Get or create topic for this session
+        let topicId = sessionToTopic.get(sessionId);
+        
+        if (!topicId) {
+            const topicName = userContent.slice(0, 50) || 'OpenCode Session';
+            console.log(`[SYNC] Creating sync topic: "${topicName}" for session ${sessionId.slice(0, 8)}`);
+            
+            const result = await createSyncTopic(sessionId, topicName, process.cwd());
+            if (!result) {
+                console.error('[SYNC] Failed to create sync topic');
+                return;
+            }
+            topicId = result.topicId;
+        }
+        
+        // Post the message exchange to the topic
+        console.log(`[SYNC] Posting to topic ${topicId} for session ${sessionId.slice(0, 8)}`);
+        await postToSyncTopic(topicId, userContent, assistantContent);
+        
+        // Track what we posted to avoid duplicates
+        lastPostedContent.set(sessionId, { userContent, assistantContent });
+        
+    } catch (error) {
+        console.error(`[SYNC] Failed to sync session ${sessionId.slice(0, 8)}:`, error.message);
+    }
+}
+
+/**
+ * Start global event subscription to sync terminal sessions to Telegram
+ */
+async function startGlobalEventSubscription() {
+    if (!SYNC_GROUP_ID) {
+        console.log('[SYNC] No sync group configured, skipping event subscription');
+        return;
+    }
+    
+    console.log('[SYNC] Starting global event subscription for session sync...');
+    
+    try {
+        const eventStream = await opencode.global.event();
+        
+        console.log('[SYNC] Global event subscription established');
+        
+        // Process events from the stream
+        for await (const event of eventStream.stream) {
+            try {
+                const payload = event?.payload || event;
+                const eventType = payload?.type;
+                
+                // Debug: log events (skip frequent ones like deltas)
+                if (eventType && !['message.part.delta', 'message.part.updated'].includes(eventType)) {
+                    console.log(`[SYNC] Event: ${eventType}`, JSON.stringify(payload.properties || {}).slice(0, 200));
+                }
+                
+                // Handle session becoming idle
+                if (eventType === 'session.status') {
+                    const sessionId = payload.properties?.sessionID;
+                    const statusType = payload.properties?.status?.type;
+                    if (sessionId && statusType === 'idle') {
+                        console.log(`[SYNC] Session ${sessionId.slice(0, 8)} became idle`);
+                        setTimeout(() => handleSessionIdle(sessionId), 100);
+                    }
+                }
+                
+                // Handle session.deleted - clean up mappings
+                if (eventType === 'session.deleted') {
+                    const sessionId = payload.properties?.sessionId;
+                    if (sessionId) {
+                        sessionToTopic.delete(sessionId);
+                        lastPostedContent.delete(sessionId);
+                        telegramInitiatedSessions.delete(sessionId);
+                    }
+                }
+            } catch (eventError) {
+                console.error('[SYNC] Error processing event:', eventError.message);
+            }
+        }
+    } catch (error) {
+        console.error('[SYNC] Global event subscription failed:', error.message);
+        // Retry after delay
+        console.log('[SYNC] Retrying event subscription in 10 seconds...');
+        setTimeout(startGlobalEventSubscription, 10000);
+    }
 }
 
 // Check if a user is authorized to use the bot
@@ -170,12 +569,13 @@ async function getAvailableModels() {
 }
 
 // Stream events and send progress updates to user
-async function streamWithProgress(chatId, sessionId, parts, modelObj, context = '') {
+async function streamWithProgress(chatId, sessionId, parts, modelObj, context = '', topicId = null) {
     let progressMessageId = null;
     
     // Send initial progress message
     try {
-        const msg = await telegramBot.sendMessage(chatId, context ? `${context}\n\n⏳ Processing...` : '⏳ Processing...');
+        const msgOptions = topicId ? { message_thread_id: topicId } : {};
+        const msg = await telegramBot.sendMessage(chatId, context ? `${context}\n\n⏳ Processing...` : '⏳ Processing...', msgOptions);
         progressMessageId = msg.message_id;
     } catch (e) {
         // Ignore progress message errors
@@ -568,9 +968,37 @@ if (telegramBot) {
         
         const chatId = msg.chat.id;
         const text = msg.text;
+        const topicId = msg.message_thread_id;
 
         if (!text) {
             // Don't show error for voice/audio (they're handled separately)
+            return;
+        }
+        
+        // Check if this is a reply in a synced topic (OpenCode session sync)
+        if (topicId && topicToSession.has(topicId)) {
+            console.log(`[SYNC] Received message in synced topic ${topicId}: "${text.substring(0, 50)}..."`);
+            try {
+                await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                    reaction: [{ type: 'emoji', emoji: '⏳' }]
+                });
+            } catch (e) { /* ignore */ }
+            
+            try {
+                await handleSyncTopicReply(topicId, msg, text);
+                try {
+                    await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                        reaction: [{ type: 'emoji', emoji: '✅' }]
+                    });
+                } catch (e) { /* ignore */ }
+            } catch (error) {
+                console.error('[SYNC] Error handling sync topic reply:', error);
+                try {
+                    await telegramBot.setMessageReaction(chatId, msg.message_id, {
+                        reaction: [{ type: 'emoji', emoji: '❌' }]
+                    });
+                } catch (e) { /* ignore */ }
+            }
             return;
         }
 
@@ -594,6 +1022,8 @@ if (telegramBot) {
                 const { data: newSession } = await opencode.session.create({});
                 sessionId = newSession.id;
                 userSessions.set(chatId, sessionId);
+                // Mark as Telegram-initiated so we don't sync back to Telegram
+                telegramInitiatedSessions.add(sessionId);
             }
 
             // Send typing indicator
@@ -1316,6 +1746,83 @@ app.get('/api/sessions', async (req, res) => {
     }
 });
 
+// ============================================
+// Sync Endpoints (for telegram-sync plugin)
+// ============================================
+
+// Create a sync topic for a session
+app.post('/sync/session', async (req, res) => {
+    try {
+        const { sessionId, title, directory } = req.body;
+        
+        if (!sessionId) {
+            return res.status(400).json({ error: 'sessionId is required' });
+        }
+        
+        // Check if we already have a topic for this session
+        let topicId = sessionToTopic.get(sessionId);
+        if (topicId) {
+            return res.json({ success: true, topicId, existing: true });
+        }
+        
+        // Create new topic
+        const result = await createSyncTopic(sessionId, title || 'OpenCode Session', directory);
+        if (!result) {
+            return res.status(500).json({ error: 'Failed to create topic' });
+        }
+        
+        res.json({ success: true, topicId: result.topicId });
+    } catch (error) {
+        console.error('[SYNC API] Error creating session topic:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Post a message to a sync topic
+app.post('/sync/message', async (req, res) => {
+    try {
+        const { sessionId, topicId, userContent, assistantContent, messageId } = req.body;
+        
+        if (!sessionId && !topicId) {
+            return res.status(400).json({ error: 'sessionId or topicId is required' });
+        }
+        
+        // Get topicId from sessionId if not provided
+        let resolvedTopicId = topicId || sessionToTopic.get(sessionId);
+        if (!resolvedTopicId) {
+            return res.status(404).json({ error: 'No topic found for session' });
+        }
+        
+        // Post to the topic
+        const success = await postToSyncTopic(resolvedTopicId, userContent, assistantContent);
+        if (!success) {
+            return res.status(500).json({ error: 'Failed to post message' });
+        }
+        
+        // Update dedup tracking
+        if (sessionId) {
+            lastPostedContent.set(sessionId, { userContent, assistantContent });
+        }
+        
+        res.json({ success: true, messageId });
+    } catch (error) {
+        console.error('[SYNC API] Error posting message:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get sync status
+app.get('/sync/status', (req, res) => {
+    res.json({
+        syncGroupId: SYNC_GROUP_ID || null,
+        activeSessions: sessionToTopic.size,
+        sessions: Array.from(sessionToTopic.entries()).map(([sessionId, topicId]) => ({
+            sessionId: sessionId.slice(0, 8) + '...',
+            topicId
+        }))
+    });
+});
+
 // 404 handler
 app.use((req, res) => {
     res.status(404).render('error', {
@@ -1338,4 +1845,12 @@ app.use((err, req, res, next) => {
 // Start Express server
 app.listen(PORT, () => {
     console.log(`OpenTelegram client running on port ${PORT}`);
+    
+    // Start global event subscription for session sync
+    if (SYNC_GROUP_ID) {
+        console.log(`[SYNC] Sync group configured: ${SYNC_GROUP_ID}`);
+        startGlobalEventSubscription();
+    } else {
+        console.log('[SYNC] No sync group configured (TELEGRAM_SYNC_GROUP_ID or TELEGRAM_GROUP_ID)');
+    }
 });

@@ -10,7 +10,43 @@ Telegram bot that connects to OpenCode AI server, enabling AI chat via Telegram 
 - Videos: Frame extraction and multi-image AI analysis
 - Model switching: Browse and select from available AI models
 - Session management: Create and switch between chat sessions
+- Two-way sync: Terminal sessions sync to Telegram Forum Topics
 - Web interface: Simple web UI for health checks
+
+## Two-Way Sync
+
+OpenTelegram supports bidirectional sync between terminal OpenCode sessions and Telegram Forum Topics:
+
+**Terminal -> Telegram:**
+- When you run OpenCode in the terminal, sessions are automatically synced to a Telegram group with Forum Topics enabled
+- Each session creates a new topic with the conversation visible in Telegram
+- User prompts and AI responses are posted to the topic
+
+**Telegram -> Terminal:**
+- Reply to a synced topic to send messages back to the OpenCode session
+- Responses are posted back to the topic
+
+### Setup
+
+1. Create a Telegram group and enable "Topics" in group settings
+2. Add your bot as an admin with permissions to manage topics
+3. Get the group ID (starts with -100 for supergroups)
+4. Set `TELEGRAM_SYNC_GROUP_ID` in your `.env` file
+
+### OpenCode Plugin
+
+Copy `plugins/telegram-sync.js` to your OpenCode plugins folder:
+
+```bash
+cp plugins/telegram-sync.js ~/.config/opencode/plugins/
+# or
+cp plugins/telegram-sync.js .opencode/plugins/
+```
+
+Set the sync URL environment variable:
+```bash
+export TELEGRAM_SYNC_URL=http://127.0.0.1:4097
+```
 
 ## Setup
 
@@ -29,6 +65,7 @@ copy this project and setup https://github.com/buyhostname/opentelegram
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from BotFather | Yes |
 | `TELEGRAM_BOT_USERNAME` | Your bot's username | Yes |
 | `TELEGRAM_GROUP_ID` | Restrict to specific group | No |
+| `TELEGRAM_SYNC_GROUP_ID` | Group for session sync (Forum Topics enabled) | No |
 | `OPENCODE_HOST` | OpenCode server host | No (default: 127.0.0.1) |
 | `OPENCODE_PORT` | OpenCode server port | No (default: 4097) |
 | `OPENCODE_MODEL` | Default AI model | No (default: opencode/minimax-m2.5-free) |
@@ -43,6 +80,12 @@ copy this project and setup https://github.com/buyhostname/opentelegram
 - `/model` - Show/set current AI model
 - `/models` - Browse available models with inline buttons
 - `/help` - Show help information
+
+## Sync API Endpoints
+
+- `POST /sync/session` - Create a sync topic for a session
+- `POST /sync/message` - Post a message to a sync topic
+- `GET /sync/status` - Get sync status and active sessions
 
 ## Requirements
 
